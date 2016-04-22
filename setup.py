@@ -22,6 +22,9 @@ with open("README.rst", "rb") as f:
 setup(
     name = "cmdline-badocker",
     packages = ["badocker"],
+    install_requires=[
+          'termcolor',
+      ],
     entry_points = {
         "console_scripts": ['badocker = badocker.badocker:main']
         },
