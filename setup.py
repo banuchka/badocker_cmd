@@ -10,7 +10,7 @@ from setuptools import setup
 
 version = re.search(
     '^__version__\s*=\s*"(.*)"',
-    open('badocker/badicker.py').read(),
+    open('badocker/badocker.py').read(),
     re.M
     ).group(1)
 
