@@ -3,7 +3,7 @@
 
 """badocker.badocker: provides entry point main()."""
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 from cmd import Cmd
 from termcolor import colored
@@ -13,24 +13,73 @@ import os
 import json
 import cStringIO
 import getopt
+from urllib import urlencode
 
+global KnownDomains
+KnownDomains=['mlan', 'ulan', 'd3','d4']
 
 def DoJob(command,args):
     try:
-        output,domain=reqStrConstructor(command,args)
+        output,domain,warning_messages,error_messages=reqStrConstructor(command,args)
 
         print colored(domain,"yellow")
+        if len(error_messages) > 0:
+            for msg in error_messages:
+                for level, message in msg.iteritems():
+                    print "{0}: {1}".format(colored(level,"red"),message)
+        if len(warning_messages) > 0:
+            for msg in warning_messages:
+                for level, message in msg.iteritems():
+                    print "{0}: {1}".format(colored(level,"red"),message)
+        if len(error_messages) > 0:
+            return
+        print
         for i in output.keys():
-            print "{0} on {1}({2}) {3}".format(colored(i,"white"),output[i]['fqdn'],output[i]['aliases'],colored(output[i]['status'],"green"))
+            if output[i]['aliases'] is not None:
+                print "{0} on {1}({2}) {3}".format(colored(i,"white"),output[i]['fqdn'],output[i]['aliases'],colored(output[i]['status'],"green"))
+            else:
+                print "{0} on {1} {2}".format(colored(i,"white"),output[i]['fqdn'],colored(output[i]['status'],"green"))
 
             if "messages" in output[i].keys():
-                for level, message in output[i]['messages'].iteritems():
-                    print "{0}: {1}".format(colored(level,"red"),message)
-            if command in ['start', 'stop', 'restart']:
+                if len(output[i]['messages']) > 0:
+                    for msg in output[i]['messages']:
+                        for level, message in msg.iteritems():
+                            print "{0}: {1}".format(colored(level,"red"),message)
+            if command in ['start', 'stop', 'restart', 'deploy']:
                 print colored("ssh {0} '{1}'".format(output[i]['fqdn'],output[i]['commands'][command]),"red")
+                if command == 'deploy':
+                    os.system("ssh {0} '{1}'".format(output[i]['fqdn'],output[i]['commands'][command]))
+            # elif command in ['deploy']:
+            #     print colored("'{0}'".format(output[i]),"red")
+            elif command in ['update']:
+                #for separate use
+                # upd = output[i]['commands'][command].split(";")
+                # for cmd in upd:
+                #     print colored("ssh {0} '{1}'".format(output[i]['fqdn'],cmd),"red")
+                # print output[i]['commands'][command].replace(";","\n")
+                print colored("ssh {0} '{1}'".format(output[i]['fqdn'],output[i]['commands'][command].replace(';','; \\\n')),"red")
 
-    except TypeError:
-        print "Unknown service \"{0}\"".format(args.split(" ")[0])
+    except TypeError as e:
+        pass
+        # print "Unknown service \"{0}\", {1}".format(args.split(" ")[0], e)
+def bdsm_sync():
+        URL='http://badocker.mlan/services/bdsm_sync'
+        buf = cStringIO.StringIO()
+        c = pycurl.Curl()
+        c.setopt(c.URL, URL)
+        c.setopt(c.WRITEFUNCTION, buf.write)
+        c.perform()
+        output = json.loads(buf.getvalue())
+        buf.close()
+        if len(output['Added Types']) > 0:
+            print "Added types from BDSM to badocker: \"{0}\"".format((", ".join(output['Added Types'])))
+        if len(output['Deleted Types']) >0:
+            print "Deleted types from badocker: \"{0}\"".format((", ".join(output['Deleted Types'])))
+        if len(output['Deleted from bdsm']) >0:
+            print "There are services in badocker, but not in BDSM: \"{0}\"".format((", ".join(output['Deleted from bdsm'])))
+        if len(output['Not in badocker']) >0:
+            print "There are services in in BDSM, but not in badocker: \"{0}\"".format((", ".join(output['Not in badocker'])))
+        return
 
 def GetServicesList():
     URL='http://docker2.mlan/services_run'
@@ -41,47 +90,95 @@ def GetServicesList():
     c.perform()
     output = json.loads(buf.getvalue())
     buf.close()
-    return sorted(output.keys())
+    # print output
+    return output
 
 def reqStrConstructor(command,args):
 
     buf = cStringIO.StringIO()
     URL='http://docker2.mlan/cmd/'+str(command)
     Domain='mlan'
+    ReqVersion = None
+    nodes = None
 
     rInfo = args.split()
     if len(rInfo) > 0:
         Service = rInfo[0]
         if Service not in KnownServices:
-                sys.stdout.write('\n')
+                sys.stdout.write('Unknown Service {0}. Use "services" command to view the list of known services\n'.format(Service))
                 return
         else:
             URL+='/{0}'.format(Service)
             del rInfo[0]
 
-        optlist, args = getopt.getopt(rInfo, 't:d:')
+        Types = GetServicesList()[Service]['known_types']
+
+        optlist, args = getopt.getopt(rInfo, 't:d:v:n:')
         for o, a in optlist:
             if o == '-t':
                 ServiceType = a
-                URL+='/{0}'.format(ServiceType)
+                if a in Types:
+                    URL+='/{0}'.format(ServiceType)
+                else:
+                    if command not in ['deploy']:
+                        sys.stdout.write('Unknown type "{0}" for service "{1}".\n'.format(ServiceType, Service))
+                        return
+                    #     URL+='/{0}'.format(ServiceType)
+                    # else:
+
+                    # return
             if o == '-d':
-                Domain = a
+                if a in KnownDomains:
+                    Domain = a
+            if o == '-v':
+                ReqVersion = a
+            if o == '-n':
+                nodes = a
 
         c = pycurl.Curl()
         c.setopt(c.URL, URL)
         c.setopt(c.WRITEFUNCTION, buf.write)
+        if command in ['update', 'deploy']:
+            post_data = {}
+            if not ReqVersion is None:
+                post_data.update({'version': ReqVersion})
+                # postfields = urlencode(post_data)
+                # c.setopt(c.POSTFIELDS, postfields)
+            if not nodes is None:
+                post_data.update({'nodes': nodes})
+            try: ServiceType
+            except: ServiceType = None
+
+            if not ServiceType is None:
+                post_data.update({'type': ServiceType})
+            if not Domain is None:
+                post_data.update({'platform': Domain})
+
+            if len(post_data) > 0:
+                postfields = urlencode(post_data)
+                c.setopt(c.POSTFIELDS, postfields)
+
         c.perform()
+        # print buf.getvalue()
         output = json.loads(buf.getvalue())
         buf.close()
-        return output[Domain],Domain
+        try:
+            return output[Domain]["Service"],Domain,output[Domain]['_WARNINGS'],output[Domain]['_ERRORS']
+        except KeyError:
+            try:
+                sys.stdout.write('Can\'t find type "{0}" for domain "{1}"\n'.format(ServiceType, Domain))
+            except UnboundLocalError:
+                sys.stdout.write('Can\'t find running "{0}" on domain "{1}"\n'.format(Service, Domain))
+            return
+
     else:
         sys.stdout.write('\n')
         return
 
-class MyPrompt(Cmd):
+class BadockerPrompt(Cmd):
 
     def do_shell(self, args):
-        """Pass command to a system shell when line begins with '!'"""
+        """Pass command to a system shell(local) when line begins with '!'"""
         os.system(args)
 
     def preloop(self):
@@ -137,29 +234,89 @@ class MyPrompt(Cmd):
                 sys.stdout.write('\n')
 
     def do_services(self, args):
-        """Show list of known services"""
-        for service in KnownServices:
-            print service
+        """Get List of services here in BaDocker
+           'services' with no arguments prints a list of services for which badocker is available
+           'services <service>' gives a list of types for <service>
+        """
+        if len(args)> 0:
+            service = args.split()[0]
+            if service in KnownServices:
+                print "Known types for service \"{0}\": {1}".format(service,", ".join(GetServicesList()[service]['known_types']))
+            else:
+                print "Unknown service \"{0}\"".format(service)
+        else:
+            for service in KnownServices:
+                print service
 
     def do_stop(self, args):
-        """Stop service"""
+        """Stop service
+           Usage: stop SERVICE [OPTION]
+           Options
+           -d   set domain (default: mlan)
+           -t   service type
+        """
 
         DoJob('stop',args)
 
     def do_status(self, args):
-        """Show service status.\nstatus [service] [type]"""
+        """Show status of service
+           Usage: status SERVICE [OPTION]
+           Options
+           -d   set domain (default: mlan)
+           -t   service type
+        """
 
         DoJob('status',args)
 
     def do_start(self, args):
-        """Start service"""
+        """Start service
+           Usage: start SERVICE [OPTION]
+           Options
+           -d   set domain (default: mlan)
+           -t   service type
+        """
 
         DoJob('start',args)
 
-    def do_restart(self, args):
-        """Start service"""
+    def do_deploy(self, args):
+        """Deploy service
+           Usage: deploy SERVICE -t TYPE [-d domain] [-v VERSION] [-n NODES]
+           Options
+           -t   service type
+           -d   set domain (default: mlan)
+           -v   service version. If not available – version from BDSM will be in use
+           -n   service nodes to deploy. If not present it will find node from BDSM
+        """
 
+        DoJob('deploy',args)
+
+    def do_restart(self, args):
+        """Restart service
+           Usage: restart SERVICE [OPTION]
+           Options
+           -d   set domain (default: mlan)
+           -t   service type
+        """
         DoJob('restart',args)
+
+    def do_update(self, args):
+        """Update service
+           Usage: update SERVICE [OPTION]
+           Options
+           -d   set domain (default: mlan)
+           -t   service type
+           -v   version (default: version from BDSM will be in use)
+        """
+
+        DoJob('update',args)
+
+    def do_bdsm_sync(self,args):
+        """Sync services and types from BDSM
+           Usage: bdsm_sync
+        """
+        bdsm_sync()
+        # print output
+
 
     def do_quit(self, args):
         """Quits the program."""
@@ -170,8 +327,11 @@ class MyPrompt(Cmd):
 # if __name__ == '__main__':
 def main():
         global KnownServices
-        KnownServices = GetServicesList()
-        prompt = MyPrompt()
-        prompt.intro = colored("Welcome to BaDocker","red")
+        KnownServices = sorted(GetServicesList().keys())
+        prompt = BadockerPrompt()
+        # prompt.intro = colored("Welcome to BaDocker","red")
+        print colored("Welcome to BaDocker","red")
+        print colored("I'm going to sync services and types from BDSM. There are results:\n","white")
+        bdsm_sync()
         prompt.prompt = colored("\nbadocker >> ","cyan")
         prompt.cmdloop_with_keyboard_interrupt()
